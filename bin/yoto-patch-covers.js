@@ -33,9 +33,10 @@ async function loadTokens () {
 
 async function main () {
   const booksDir = resolve(process.argv[2] || '')
+  const only = process.argv[3] || null // optional: patch a single book by name
 
   if (!process.argv[2]) {
-    console.error('Usage: node bin/yoto-patch-covers.js /path/to/your/audiobooks')
+    console.error('Usage: node bin/yoto-patch-covers.js /path/to/your/audiobooks [book-name]')
     process.exit(1)
   }
 
@@ -83,6 +84,7 @@ async function main () {
   let skipped = 0
 
   for (const [bookName, entry] of Object.entries(progress)) {
+    if (only && bookName !== only) continue
     const cardId = typeof entry === 'string' ? entry : entry.cardId
     const bookDir = join(booksDir, bookName)
     const coverFile = COVER_NAMES.map(n => join(bookDir, n)).find(p => existsSync(p))
@@ -114,7 +116,7 @@ async function main () {
       const { coverImage } = await client.uploadCoverImage({
         imageData: buffer,
         filename,
-        coverType: 'myo'
+        coverType: 'default' // 638x1011 portrait; 'myo' is a 520x400 landscape crop
       })
 
       await client.createOrUpdateContent({

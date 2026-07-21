@@ -280,7 +280,7 @@ async function main () {
         const { coverImage } = await client.uploadCoverImage({
           imageData: buffer,
           filename,
-          coverType: 'myo'
+          coverType: 'default' // 638x1011 portrait; 'myo' is a 520x400 landscape crop
         })
         coverUrl = coverImage.mediaUrl
         console.log('✓')

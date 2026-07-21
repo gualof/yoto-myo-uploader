@@ -1,11 +1,12 @@
 // cover-image.js
 // Prepares a cover image for Yoto MYO upload.
 //
-// Yoto resizes MYO cover art (coverType 'myo') to a fixed 638x1011 portrait
-// frame and CROPS whatever doesn't match that ratio — so square or oddly-sized
-// covers lose their edges. We pre-fit the image onto a 638x1011 canvas so Yoto's
-// resize becomes a no-op (nothing cropped). Off-ratio images get a blurred copy
-// of themselves as the background fill instead of hard bars.
+// Yoto resizes cover art (coverType 'default') to a fixed 638x1011 portrait
+// frame, preserving aspect ratio and center-cropping the overflow — so square
+// or oddly-sized covers lose their edges. We pre-fit the image onto a 638x1011
+// canvas so Yoto's resize becomes a no-op (nothing cropped). Off-ratio images
+// get a blurred copy of themselves as the background fill instead of hard bars.
+// (Note: coverType 'myo' is a 520x400 LANDSCAPE box — wrong for book covers.)
 
 import { execFile } from 'child_process'
 import { promisify } from 'util'
