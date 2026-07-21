@@ -14,6 +14,7 @@ import { readdir, readFile, writeFile, mkdir, stat } from 'fs/promises'
 import { join, basename, resolve } from 'path'
 import { homedir } from 'os'
 import { existsSync } from 'fs'
+import { prepareCover } from './cover-image.js'
 
 const CONFIG_DIR = join(homedir(), '.yoto-myo-uploader')
 const TOKENS_FILE = join(CONFIG_DIR, 'tokens.json')
@@ -94,10 +95,11 @@ async function main () {
 
     process.stdout.write(`Patching: ${bookName} ... `)
     try {
-      const imageData = await readFile(coverFile)
+      // Pad to Yoto's cover ratio so it isn't cropped when Yoto resizes it.
+      const { buffer, filename } = await prepareCover(coverFile)
       const { coverImage } = await client.uploadCoverImage({
-        imageData,
-        filename: basename(coverFile),
+        imageData: buffer,
+        filename,
         coverType: 'myo'
       })
 
