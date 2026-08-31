@@ -7,7 +7,8 @@
     "yoto-convert": "./bin/yoto-convert.js",
     "yoto-upload": "./bin/yoto-upload.js",
     "yoto-serve": "./bin/yoto-serve.js",
-    "yoto-patch-covers": "./bin/yoto-patch-covers.js"
+    "yoto-patch-covers": "./bin/yoto-patch-covers.js",
+    "yoto-fix-track-format": "bin/yoto-fix-track-format.js"
   },
   "scripts": {
     "convert": "node bin/yoto-convert.js",
@@ -23,6 +24,11 @@
   "engines": {
     "node": ">=18"
   },
-  "keywords": ["yoto", "myo", "audiobook", "upload"],
+  "keywords": [
+    "yoto",
+    "myo",
+    "audiobook",
+    "upload"
+  ],
   "license": "MIT"
 }

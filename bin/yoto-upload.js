@@ -189,7 +189,19 @@ async function uploadAndTranscode (client, filePath, accessToken) {
     })
     const body = await pollResp.json()
     const transcodedSha256 = body.transcode?.transcodedSha256
-    if (transcodedSha256) return transcodedSha256
+    if (transcodedSha256) {
+      // The Yoto player needs `format` on each track to pick a decoder. Yoto
+      // fills in duration/fileSize server-side but never format, and a card
+      // without it is accepted, reported as ~1s per track, and raced through in
+      // silence on the player (the phone app sniffs the container, so it plays
+      // there — which is what makes this look like a player problem).
+      const info = body.transcode?.transcodedInfo || {}
+      return {
+        transcodedSha256,
+        format: info.format || info.codec || null,
+        channels: info.channels || null
+      }
+    }
     if (body.transcode?.progress?.phase === 'failed') {
       throw new Error(`Yoto transcoding failed for ${filename}`)
     }
@@ -265,9 +277,9 @@ async function main () {
     // Upload + transcode tracks concurrently; mapPool returns results in file order.
     const results = await mapPool(files, CONCURRENCY, async (file, t) => {
       const trackTitle = file.replace(/^\d+[\s._-]+/, '').replace(/\.mp3$/i, '')
-      const transcodedSha256 = await uploadAndTranscode(client, join(bookDir, file), tokens.accessToken)
+      const media = await uploadAndTranscode(client, join(bookDir, file), tokens.accessToken)
       console.log(`    [${t + 1}/${files.length}] ${trackTitle} ✓`)
-      return { trackTitle, transcodedSha256 }
+      return { trackTitle, ...media }
     })
 
     const chapters = results.map((r, t) => ({
@@ -277,9 +289,16 @@ async function main () {
         key: `tr${String(t + 1).padStart(3, '0')}`,
         title: r.trackTitle,
         trackUrl: `yoto:#${r.transcodedSha256}`,
-        type: 'audio'
+        type: 'audio',
+        ...(r.format && { format: r.format }),
+        ...(r.channels && { channels: r.channels })
       }]
     }))
+
+    const noFormat = results.filter(r => !r.format).length
+    if (noFormat > 0) {
+      console.log(`  ! ${noFormat} track(s) have no format — the Yoto player will skip them. Run yoto-fix-track-format after.`)
+    }
 
     // Upload cover art if present
     let coverUrl = null
