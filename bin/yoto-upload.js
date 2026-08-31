@@ -13,11 +13,21 @@ import { createHash } from 'crypto'
 import { join, extname, basename, resolve } from 'path'
 import { homedir } from 'os'
 import { existsSync } from 'fs'
+import { prepareCover } from './cover-image.js'
 
 const COVER_NAMES = ['cover.jpg', 'cover.jpeg', 'cover.png', 'folder.jpg', 'folder.jpeg', 'folder.png']
 
 const YOTO_API = 'https://api.yotoplay.com'
 const CLIENT_ID = DEFAULT_CLIENT_ID
+// Yoto's actual scopes (the library default 'openid profile offline_access' is
+// generic OIDC boilerplate — 'openid' isn't a valid Yoto scope, so Auth0 rejects
+// it with a 403). Creating MYO cards needs user:content:manage (which includes
+// content:view + icons:manage for cover art); offline_access enables refresh.
+// See https://yoto.dev/authentication/scopes/
+const SCOPE = 'user:content:manage offline_access'
+// How many tracks to upload+transcode at once per book (the web UI parallelizes
+// too). Modest default to respect rate limits; override with YOTO_CONCURRENCY.
+const CONCURRENCY = Math.max(1, parseInt(process.env.YOTO_CONCURRENCY || '4', 10))
 const CONFIG_DIR = join(homedir(), '.yoto-myo-uploader')
 const TOKENS_FILE = join(CONFIG_DIR, 'tokens.json')
 const PROGRESS_FILE = join(CONFIG_DIR, 'progress.json')
@@ -77,7 +87,7 @@ async function authenticate () {
     })
   }
 
-  const deviceAuth = await YotoClient.requestDeviceCode({ clientId: CLIENT_ID })
+  const deviceAuth = await YotoClient.requestDeviceCode({ clientId: CLIENT_ID, scope: SCOPE })
   console.log('\n╔═══════════════════════════════════════════════════════════╗')
   console.log('║  Log in to your Yoto account to continue:                 ║')
   console.log(`║  ${deviceAuth.verification_uri_complete.padEnd(57)}║`)
@@ -116,6 +126,29 @@ async function authenticate () {
 //   3. Poll /media/upload/{uploadId}/transcoded until transcodedSha256 appears
 //   4. Return transcodedSha256 for use in trackUrl
 
+// Card display title: for series folders "Series - N - Title", drop the first
+// hyphen so it reads "Series N - Title" (e.g. "Mary Poppins 2 - Mary Poppins
+// Comes Back"). Single-book folders (no " - <number>") are left unchanged.
+function cardTitle (name) {
+  return name.replace(/ - (?=\d)/, ' ')
+}
+
+// Run fn over items with bounded concurrency; results returned in input order.
+// If any fn rejects, the returned promise rejects (book won't be marked done).
+async function mapPool (items, limit, fn) {
+  const results = new Array(items.length)
+  let next = 0
+  async function worker () {
+    while (true) {
+      const i = next++
+      if (i >= items.length) return
+      results[i] = await fn(items[i], i)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  return results
+}
+
 async function uploadAndTranscode (client, filePath, accessToken) {
   const data = await readFile(filePath)
   const sha256 = createHash('sha256').update(data).digest('hex')
@@ -135,10 +168,10 @@ async function uploadAndTranscode (client, filePath, accessToken) {
     }
   }
 
-  // Poll until transcoding is complete (~10–30s per track)
-  for (let i = 0; i < 60; i++) {
-    await new Promise(r => setTimeout(r, 10000))
-    process.stdout.write('.')
+  // Poll until transcoding is complete. Yoto usually finishes in ~10–30s, so we
+  // poll every 3s (no long dead-wait before the first check). ~200 tries ≈ 10 min.
+  for (let i = 0; i < 200; i++) {
+    await new Promise(r => setTimeout(r, 3000))
     const pollResp = await fetch(`${YOTO_API}/media/upload/${upload.uploadId}/transcoded`, {
       headers: { Authorization: `Bearer ${accessToken}` }
     })
@@ -216,29 +249,25 @@ async function main () {
       continue
     }
 
-    const chapters = []
-    for (let t = 0; t < files.length; t++) {
-      const trackTitle = files[t].replace(/^\d+[\s._-]+/, '').replace(/\.mp3$/i, '')
-      process.stdout.write(`  [${t + 1}/${files.length}] ${trackTitle} `)
+    console.log(`  Uploading ${files.length} tracks (${CONCURRENCY} at a time)...`)
+    // Upload + transcode tracks concurrently; mapPool returns results in file order.
+    const results = await mapPool(files, CONCURRENCY, async (file, t) => {
+      const trackTitle = file.replace(/^\d+[\s._-]+/, '').replace(/\.mp3$/i, '')
+      const transcodedSha256 = await uploadAndTranscode(client, join(bookDir, file), tokens.accessToken)
+      console.log(`    [${t + 1}/${files.length}] ${trackTitle} ✓`)
+      return { trackTitle, transcodedSha256 }
+    })
 
-      const transcodedSha256 = await uploadAndTranscode(
-        client,
-        join(bookDir, files[t]),
-        tokens.accessToken
-      )
-      console.log(' ✓')
-
-      chapters.push({
-        key: `ch${String(t + 1).padStart(3, '0')}`,
-        title: trackTitle,
-        tracks: [{
-          key: `tr${String(t + 1).padStart(3, '0')}`,
-          title: trackTitle,
-          trackUrl: `yoto:#${transcodedSha256}`,
-          type: 'audio'
-        }]
-      })
-    }
+    const chapters = results.map((r, t) => ({
+      key: `ch${String(t + 1).padStart(3, '0')}`,
+      title: r.trackTitle,
+      tracks: [{
+        key: `tr${String(t + 1).padStart(3, '0')}`,
+        title: r.trackTitle,
+        trackUrl: `yoto:#${r.transcodedSha256}`,
+        type: 'audio'
+      }]
+    }))
 
     // Upload cover art if present
     let coverUrl = null
@@ -246,11 +275,12 @@ async function main () {
     if (coverFile) {
       process.stdout.write('  Uploading cover art... ')
       try {
-        const imageData = await readFile(coverFile)
+        // Pad to Yoto's cover ratio so it isn't cropped when Yoto resizes it.
+        const { buffer, filename } = await prepareCover(coverFile)
         const { coverImage } = await client.uploadCoverImage({
-          imageData,
-          filename: basename(coverFile),
-          coverType: 'myo'
+          imageData: buffer,
+          filename,
+          coverType: 'default' // 638x1011 portrait; 'myo' is a 520x400 landscape crop
         })
         coverUrl = coverImage.mediaUrl
         console.log('✓')
@@ -261,7 +291,7 @@ async function main () {
 
     const card = await client.createOrUpdateContent({
       content: {
-        title: bookName,
+        title: cardTitle(bookName),
         content: { chapters },
         ...(coverUrl && { metadata: { cover: { imageL: coverUrl } } })
       }
