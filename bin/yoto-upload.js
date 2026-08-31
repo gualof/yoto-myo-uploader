@@ -133,6 +133,18 @@ function cardTitle (name) {
   return name.replace(/ - (?=\d)/, ' ')
 }
 
+// Yoto card IDs are normally mixed-case (e.g. "hIjsw"), but an all-digit one
+// turns up occasionally and breaks Home Assistant's Yoto media browser.
+const NUMERIC_ID_RETRIES = 3
+
+function readCardId (card) {
+  return card.cardId || card.card?.cardId || 'unknown'
+}
+
+function isNumericCardId (cardId) {
+  return /^\d+$/.test(String(cardId))
+}
+
 // Run fn over items with bounded concurrency; results returned in input order.
 // If any fn rejects, the returned promise rejects (book won't be marked done).
 async function mapPool (items, limit, fn) {
@@ -289,15 +301,34 @@ async function main () {
       }
     }
 
-    const card = await client.createOrUpdateContent({
-      content: {
-        title: cardTitle(bookName),
-        content: { chapters },
-        ...(coverUrl && { metadata: { cover: { imageL: coverUrl } } })
-      }
-    })
+    const content = {
+      title: cardTitle(bookName),
+      content: { chapters },
+      ...(coverUrl && { metadata: { cover: { imageL: coverUrl } } })
+    }
 
-    const cardId = card.cardId || card.card?.cardId || 'unknown'
+    let card = await client.createOrUpdateContent({ content })
+    let cardId = readCardId(card)
+
+    // Yoto sometimes hands out an all-digit card ID. Home Assistant's yoto
+    // integration then breaks: yoto_api coerces digit-only strings to ints, and
+    // building the browse URI does '/'.join([...card.id]) -> TypeError, which
+    // kills the media browser for the whole library, not just this card.
+    // Re-post to draw a different ID, then delete the numeric one.
+    for (let attempt = 0; attempt < NUMERIC_ID_RETRIES && isNumericCardId(cardId); attempt++) {
+      console.log(`  Card ID ${cardId} is all digits (breaks Home Assistant) — re-creating...`)
+      const numericId = cardId
+      card = await client.createOrUpdateContent({ content })
+      cardId = readCardId(card)
+      try {
+        await client.deleteContent({ cardId: numericId })
+      } catch (e) {
+        console.log(`  (could not delete ${numericId}: ${e.message} — remove it in the Yoto app)`)
+      }
+    }
+    if (isNumericCardId(cardId)) {
+      console.log(`  ! Card ID ${cardId} is still all digits — Home Assistant's media browser will fail until it is re-created.`)
+    }
     await markDone(booksDir, bookName, cardId)
     console.log(`  ✓ Card created: ${cardId}\n`)
     uploaded++
