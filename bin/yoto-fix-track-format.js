@@ -16,6 +16,10 @@
  * assumed, then written back with the card's content preserved verbatim
  * (createOrUpdateContent REPLACES content — a partial write wipes the audio).
  *
+ * It also corrects a stored `channels` value that disagrees with the media. An
+ * earlier version of this script wrote a hardcoded 'stereo', which was wrong for
+ * every mono book, so a card can carry `format` and still be mislabelled.
+ *
  * Usage:
  *   node bin/yoto-fix-track-format.js [--dry-run] [--all] [--card <id>]
  *
@@ -131,23 +135,42 @@ async function main () {
       // would clobber audio that is probably still there.
       if (chapters.length === 0) { console.log(`${label} — SKIP (no chapters)`); skipped++; continue }
 
-      const missing = chapters.flatMap(ch => ch.tracks || []).filter(t => !t.format)
-      if (missing.length === 0) { console.log(`${label} — already has format`); ok++; continue }
+      const tracks = chapters.flatMap(ch => ch.tracks || [])
+      const missing = tracks.filter(t => !t.format)
 
       const media = await detectMedia(token, cardId)
       if (!media) { console.log(`${label} — SKIP (could not detect format)`); skipped++; continue }
       const { format, channels } = media
 
-      console.log(`${label} — ${missing.length} track(s) missing format -> ${format}${channels ? `/${channels}` : ''}${dryRun ? '' : ' ...'}`)
+      // An earlier version of this script wrote a hardcoded channels: 'stereo',
+      // so a card can have `format` set and still carry a wrong channel count.
+      // Correct a stored value that disagrees with the media instead of trusting
+      // it — checking only for a missing `format` would skip these entirely.
+      const misdeclared = channels ? tracks.filter(t => t.channels && t.channels !== channels) : []
+
+      if (missing.length === 0 && misdeclared.length === 0) {
+        console.log(`${label} — already correct`); ok++; continue
+      }
+
+      const what = [
+        missing.length ? `${missing.length} track(s) missing format -> ${format}` : null,
+        misdeclared.length ? `${misdeclared.length} track(s) channels ${misdeclared[0].channels} -> ${channels}` : null
+      ].filter(Boolean).join(', ')
+      console.log(`${label} — ${what}${dryRun ? '' : ' ...'}`)
       if (dryRun) { fixed++; continue }
 
-      // Leave channels alone when it could not be read — an absent field beats a
-      // guessed one, and `format` is what the player actually needs.
+      // Leave channels absent when it could not be read — an absent field beats
+      // a guessed one, and `format` is what the player actually needs.
       const patched = chapters.map(ch => ({
         ...ch,
-        tracks: (ch.tracks || []).map(t => (t.format
-          ? t
-          : { ...t, format, ...((t.channels || channels) && { channels: t.channels || channels }) }))
+        tracks: (ch.tracks || []).map(t => {
+          const fixedChannels = channels && t.channels !== channels ? channels : t.channels
+          if (t.format) {
+            // Already has format; only correct a channel count that disagrees.
+            return t.channels && channels && t.channels !== channels ? { ...t, channels } : t
+          }
+          return { ...t, format, ...((fixedChannels || channels) && { channels: fixedChannels || channels }) }
+        })
       }))
       await api(token, '/content', {
         method: 'POST',
